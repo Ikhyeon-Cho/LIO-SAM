@@ -1,0 +1,12 @@
+# LIO-SAM Sensor Presets
+# Matched by vendor keyword in sensor name (e.g., "velodyne_front" → velodyne preset)
+
+velodyne:
+  sensor: velodyne
+  N_SCAN: 16          # VLP-16
+  Horizon_SCAN: 1800
+
+ouster:
+  sensor: ouster
+  N_SCAN: 64          # OS1-64
+  Horizon_SCAN: 1024

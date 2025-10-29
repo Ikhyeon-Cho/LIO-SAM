@@ -1,13 +1,13 @@
 lio_sam:
 
   # Topics
-  pointCloudTopic: "/velodyne_tilted/velodyne_points"               # Point cloud data
-  imuTopic: "/imu/data"                         # IMU data
+  pointCloudTopic: "/velodyne/velodyne_points"               # Point cloud data
+  imuTopic: "/xsens/imu/data"                         # IMU data
   odomTopic: "odometry/imu"                   # IMU pre-preintegration odometry, same frequency as IMU
   gpsTopic: "odometry/gpsz"                   # GPS odometry topic from navsat, see module_navsat.launch file
 
   # Frames
-  lidarFrame: "velodyne_tilted"
+  lidarFrame: "velodyne"
   baselinkFrame: "base_link"
   odometryFrame: "odom"
   mapFrame: "map"
@@ -61,9 +61,9 @@ lio_sam:
   surfFeatureMinValidNum: 100
 
   # voxel filter paprams
-  odometrySurfLeafSize: 0.05                     # default: 0.4 - outdoor, 0.2 - indoor
-  mappingCornerLeafSize: 0.05                    # default: 0.2 - outdoor, 0.1 - indoor
-  mappingSurfLeafSize: 0.05                      # default: 0.4 - outdoor, 0.2 - indoor
+  odometrySurfLeafSize: 0.4                     # default: 0.4 - outdoor, 0.2 - indoor
+  mappingCornerLeafSize: 0.2                    # default: 0.2 - outdoor, 0.1 - indoor
+  mappingSurfLeafSize: 0.4                      # default: 0.4 - outdoor, 0.2 - indoor
 
   # robot motion constraint (in case you are using a 2D robot)
   z_tollerance: 1000                            # meters
