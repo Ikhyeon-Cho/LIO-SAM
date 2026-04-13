@@ -1,7 +1,10 @@
 #pragma once
 #ifndef _UTILITY_LIDAR_ODOMETRY_H_
 #define _UTILITY_LIDAR_ODOMETRY_H_
-#define PCL_NO_PRECOMPILE 
+#define PCL_NO_PRECOMPILE
+
+// Fix FLANN/PCL compatibility on Ubuntu 20.04 (FLANN 1.9 + PCL 1.10)
+#include <flann/flann.hpp>
 
 #include <ros/ros.h>
 
@@ -15,7 +18,7 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-#include <opencv/cv.h>
+#include <opencv2/opencv.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>

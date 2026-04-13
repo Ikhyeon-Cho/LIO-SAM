@@ -2,6 +2,9 @@
 #include "lio_sam/cloud_info.h"
 #include "lio_sam/save_map.h"
 
+#include <fstream>
+#include <csignal>
+
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -153,6 +156,17 @@ public:
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
 
+    // Dense pose history: every scan's pose (for globally-corrected TUM output)
+    struct ScanPose {
+        double time;
+        float transform[6];  // roll, pitch, yaw, x, y, z
+        int nearestKeyframeIdx;  // index into cloudKeyPoses6D
+    };
+    std::vector<ScanPose> allScanPoses;
+
+    // Body-frame deskewed cloud publisher
+    ros::Publisher pubCloudDeskewedBody;
+
 
     mapOptimization()
     {
@@ -180,6 +194,7 @@ public:
         pubRecentKeyFrames    = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/map_local", 1);
         pubRecentKeyFrame     = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/cloud_registered", 1);
         pubCloudRegisteredRaw = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/cloud_registered_raw", 1);
+        pubCloudDeskewedBody  = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/cloud_deskewed_body", 1);
 
         pubSLAMInfo           = nh.advertise<lio_sam::cloud_info>("lio_sam/mapping/slam_info", 1);
 
@@ -265,6 +280,16 @@ public:
             correctPoses();
 
             publishOdometry();
+
+            // Record every scan pose for dense trajectory output
+            {
+                ScanPose sp;
+                sp.time = timeLaserInfoCur;
+                std::copy(transformTobeMapped, transformTobeMapped + 6, sp.transform);
+                sp.nearestKeyframeIdx = cloudKeyPoses6D->size() > 0
+                    ? (int)cloudKeyPoses6D->size() - 1 : -1;
+                allScanPoses.push_back(sp);
+            }
 
             publishFrames();
         }
@@ -1718,7 +1743,7 @@ public:
             *cloudOut += *transformPointCloud(laserCloudSurfLastDS,    &thisPose6D);
             publishCloud(pubRecentKeyFrame, cloudOut, timeLaserInfoStamp, odometryFrame);
         }
-        // publish registered high-res raw cloud
+        // publish registered high-res raw cloud (world frame)
         if (pubCloudRegisteredRaw.getNumSubscribers() != 0)
         {
             pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
@@ -1726,6 +1751,13 @@ public:
             PointTypePose thisPose6D = trans2PointTypePose(transformTobeMapped);
             *cloudOut = *transformPointCloud(cloudOut,  &thisPose6D);
             publishCloud(pubCloudRegisteredRaw, cloudOut, timeLaserInfoStamp, odometryFrame);
+        }
+        // publish deskewed cloud in body (lidar) frame — no world transform
+        if (pubCloudDeskewedBody.getNumSubscribers() != 0)
+        {
+            pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
+            pcl::fromROSMsg(cloudInfo.cloud_deskewed, *cloudOut);
+            publishCloud(pubCloudDeskewedBody, cloudOut, timeLaserInfoStamp, lidarFrame);
         }
         // publish path
         if (pubPath.getNumSubscribers() != 0)
@@ -1756,17 +1788,99 @@ public:
             }
         }
     }
+    /**
+     * Save globally-corrected dense trajectory as TUM format.
+     *
+     * For each scan pose, find its nearest keyframe and apply the
+     * correction: T_corrected = T_optimized_kf * inv(T_original_kf) * T_original_scan.
+     * This propagates loop-closure corrections to every scan, not just keyframes.
+     */
+    void saveDenseTrajectory(const std::string& filepath)
+    {
+        if (allScanPoses.empty() || cloudKeyPoses6D->empty()) {
+            ROS_WARN("No poses to save.");
+            return;
+        }
+
+        // Build optimized keyframe affines (after final GTSAM update)
+        int numKeyframes = cloudKeyPoses6D->size();
+        std::vector<Eigen::Affine3f> kfOptimized(numKeyframes);
+        for (int i = 0; i < numKeyframes; i++) {
+            auto& p = cloudKeyPoses6D->points[i];
+            kfOptimized[i] = pcl::getTransformation(p.x, p.y, p.z, p.roll, p.pitch, p.yaw);
+        }
+
+        // Build original keyframe affines from allScanPoses at keyframe timestamps
+        // Each keyframe i was saved at the scan where nearestKeyframeIdx first became i
+        std::vector<Eigen::Affine3f> kfOriginal(numKeyframes);
+        std::vector<bool> kfOriginalFound(numKeyframes, false);
+        for (auto& sp : allScanPoses) {
+            int ki = sp.nearestKeyframeIdx;
+            if (ki >= 0 && ki < numKeyframes && !kfOriginalFound[ki]) {
+                kfOriginal[ki] = pcl::getTransformation(
+                    sp.transform[3], sp.transform[4], sp.transform[5],
+                    sp.transform[0], sp.transform[1], sp.transform[2]);
+                kfOriginalFound[ki] = true;
+            }
+        }
+
+        std::ofstream ofs(filepath);
+        if (!ofs.is_open()) {
+            ROS_ERROR("Cannot open %s for writing.", filepath.c_str());
+            return;
+        }
+        ofs << std::fixed << std::setprecision(9);
+
+        for (auto& sp : allScanPoses) {
+            Eigen::Affine3f T_original = pcl::getTransformation(
+                sp.transform[3], sp.transform[4], sp.transform[5],
+                sp.transform[0], sp.transform[1], sp.transform[2]);
+
+            int ki = sp.nearestKeyframeIdx;
+            Eigen::Affine3f T_corrected;
+            if (ki >= 0 && ki < numKeyframes && kfOriginalFound[ki]) {
+                // T_corrected = T_opt_kf * inv(T_orig_kf) * T_orig_scan
+                T_corrected = kfOptimized[ki] * kfOriginal[ki].inverse() * T_original;
+            } else {
+                T_corrected = T_original;
+            }
+
+            // Extract translation + quaternion
+            Eigen::Quaternionf q(T_corrected.rotation());
+            Eigen::Vector3f t = T_corrected.translation();
+            ofs << sp.time << " "
+                << t.x() << " " << t.y() << " " << t.z() << " "
+                << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+        }
+
+        ofs.close();
+        ROS_INFO("Saved %zu dense poses to %s", allScanPoses.size(), filepath.c_str());
+    }
 };
+
+// Global pointer for signal handler
+mapOptimization* g_MO = nullptr;
+
+void signalHandler(int sig)
+{
+    if (g_MO) {
+        ROS_INFO("Saving globally-corrected dense trajectory...");
+        g_MO->saveDenseTrajectory("/output/pose.tum");
+    }
+    ros::shutdown();
+}
 
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "lio_sam");
+    ros::init(argc, argv, "lio_sam", ros::init_options::NoSigintHandler);
 
     mapOptimization MO;
+    g_MO = &MO;
+    signal(SIGINT, signalHandler);
 
     ROS_INFO("\033[1;32m----> Map Optimization Started.\033[0m");
-    
+
     std::thread loopthread(&mapOptimization::loopClosureThread, &MO);
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, &MO);
 
