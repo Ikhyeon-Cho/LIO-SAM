@@ -6,10 +6,10 @@
 source /opt/ros/noetic/setup.bash
 source /ws/devel/setup.bash
 
-# 1. Load config (override the default params.yaml)
+# 1. Load config
 rosparam load /config/params.yaml
 
-# 2. Launch LIO-SAM nodes (background) — launch file assigns unique node names
+# 2. Launch LIO-SAM nodes (background)
 roslaunch lio_sam module_loam.launch --wait &
 LAUNCH_PID=$!
 sleep 3
@@ -19,20 +19,22 @@ rosbag record -O /output/record \
   /lio_sam/mapping/cloud_deskewed_body &
 PID_REC=$!
 
-# 4. Handle SIGINT: stop record first (flush), then algorithm
+# 4. Shutdown handler
+SHUTDOWN=0
 shutdown() {
-    # Stop recording — SIGINT flushes bag header
+    SHUTDOWN=1
+
+    # Stop recording first — SIGINT flushes bag header
     kill -INT $PID_REC 2>/dev/null
     wait $PID_REC 2>/dev/null || true
 
-    # Stop roslaunch — propagates SIGINT to all nodes
-    # mapOptmization's signal handler saves /output/pose.tum
+    # Stop roslaunch — mapOptmization saves /output/pose.tum on SIGINT
     kill -INT $LAUNCH_PID 2>/dev/null
     wait $LAUNCH_PID 2>/dev/null || true
-
-    exit 0
 }
 trap shutdown INT TERM
 
-# 5. Wait indefinitely — host sends SIGINT after xbag play finishes
-wait
+# 5. Wait — loop to ensure trap is handled
+while [ $SHUTDOWN -eq 0 ]; do
+    wait -n 2>/dev/null || true
+done
